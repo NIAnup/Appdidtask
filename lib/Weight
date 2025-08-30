@@ -1,0 +1,512 @@
+// omron_service.dart
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+
+import '../utils/tools/debug_tools/debug_tools.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+import 'dart:async';
+import 'package:flutter/services.dart';
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:fl_chart/fl_chart.dart';
+
+import 'package:flutter/services.dart';
+
+class OmronService {
+  static const MethodChannel _channel = MethodChannel('omron_channel');
+
+  /// Sets the user hash ID for the Omron SDK.
+  static Future<void> setUserHashId(String userHashId) async {
+    await _channel.invokeMethod('setUserHashId', userHashId);
+  }
+
+  /// Returns list of device info maps: [{name: ..., identifier: ...}]
+  static Future<List<Map<String, String>>> scanDevices() async {
+    final List devices = await _channel.invokeMethod('startScan');
+    return devices.cast<Map>().map((e) => Map<String, String>.from(e)).toList();
+  }
+
+  /// Connects to a device with the given identifier and user settings.
+  /// userSettings should be a map like: {'height': '18000', 'gender': 'Male', 'dateOfBirth': '19900101'}
+  static Future<String> connectToDevice(String identifier, {Map<String, String>? userSettings}) async {
+    final result = await _channel.invokeMethod('connectDevice', {
+      'identifier': identifier,
+      'userSettings': userSettings ?? {},
+    });
+    return result;
+  }
+
+  /// Placeholder for sending user profile if needed as a separate operation.
+  static Future<String> sendUserProfile() async {
+    // This method would need corresponding native implementation if required.
+    // For now, user settings are passed during connectToDevice.
+    return Future.value("Not implemented as a separate call. User profile sent with connectToDevice.");
+  }
+
+  /// Initiates data transfer from the connected device.
+  static Future<Map<String, dynamic>> getData() async {
+    final result = await _channel.invokeMethod('transferData');
+    return Map<String, dynamic>.from(result);
+  }
+}
+//
+class OmronConnectScreen extends StatefulWidget {
+  const OmronConnectScreen({super.key});
+
+  @override
+  State<OmronConnectScreen> createState() => _OmronConnectScreenState();
+}
+
+class _OmronConnectScreenState extends State<OmronConnectScreen> {
+  List<Map<String, String>> _devices = [];
+  String _connectionStatus = 'Disconnected';
+  Map<String, dynamic>? _measurementData;
+  bool _isScanning = false;
+  bool _isMachineReady = false; // New state variable
+  final TextEditingController _userHashIdController = TextEditingController(text: 'testuser@wellnessz.com');
+  final TextEditingController _heightController = TextEditingController(text: '18000');
+  final TextEditingController _genderController = TextEditingController(text: 'Male');
+  final TextEditingController _dobController = TextEditingController(text: '19900101');
+
+  @override
+  void initState() {
+    super.initState();
+    _requestPermissions();
+  }
+  Future<void> savePairedDevice(String identifier) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString("paired_device_address", identifier);
+  }
+  Future<void> _requestPermissions() async {
+    // Request Bluetooth and Location permissions
+    await [Permission.bluetoothScan, Permission.bluetoothConnect, Permission.locationWhenInUse].request();
+  }
+
+  Future<void> _setUserHashId() async {
+    try {
+      await OmronService.setUserHashId(_userHashIdController.text);
+      _showSnackBar('User Hash ID set successfully!');
+    } catch (e) {
+      _showSnackBar('Failed to set User Hash ID: $e');
+    }
+  }
+
+  Future<void> _startScan() async {
+    setState(() {
+      _isScanning = true;
+      _devices = [];
+      _connectionStatus = 'Scanning...';
+      _isMachineReady = false; // Reset machine ready state on new scan
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final known = prefs.getString("paired_device_address");
+      final devices = await OmronService.scanDevices();
+
+
+
+      // final devices = await OmronService.scanDevices();
+      kDebugPrint("Scanned devices: $devices");
+      kDebugPrint("Scanned devices: $known");
+
+      if (known != null) {
+        final auto = devices.firstWhere(
+              (d) => d['identifier'] == known,
+          orElse: () => {},
+        );
+        kDebugPrint("Scanned devices: $auto");
+        if (auto.isNotEmpty) {
+          await OmronService.connectToDevice(auto['identifier']!);
+        }
+      }
+
+      setState(() {
+        _devices = devices;
+        _connectionStatus = 'Scan complete. Found ${devices.length} devices.';
+      });
+    } catch (e) {
+      setState(() {
+        _connectionStatus = 'Scan failed: $e';
+      });
+    } finally {
+      setState(() {
+        _isScanning = false;
+      });
+    }
+  }
+
+
+  Future<void> autoConnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedIdentifier = prefs.getString("paired_device_address");
+    kDebugPrint("Scanned devices: $savedIdentifier");
+
+    if (savedIdentifier == null) {
+      setState(() => _connectionStatus = "No saved device. Please connect manually once.");
+      return;
+    }
+
+    setState(() => _connectionStatus = "Scanning for saved device...");
+
+    final devices = await OmronService.scanDevices();
+    kDebugPrint("Scanned : $devices");
+
+    final match = devices.firstWhere(
+          (d) => d['identifier']?.toString().trim().toLowerCase() ==
+          savedIdentifier.trim().toLowerCase(),
+      orElse: () => {},
+    );
+    kDebugPrint("identifier devices: $match");
+
+    if (match.isNotEmpty) {
+      setState(() => _connectionStatus = "Connecting to $savedIdentifier...");
+   kDebugPrint("match is available: $match");
+      // ✅ Load profile
+      final prefs = await SharedPreferences.getInstance();
+      final userSettingsdata = {
+        "height": prefs.getString("user_height") ?? "18000",
+        "gender": prefs.getString("user_gender") ?? "Male",
+        "dateOfBirth": prefs.getString("user_dob") ?? "19900101",
+      };
+
+      // ✅ Pass profile to native side
+      final status = await OmronService.connectToDevice(
+        savedIdentifier,
+        userSettings: userSettingsdata,
+      );
+
+      kDebugPrint("yes done devices: $status");
+
+      if (status.contains("Connected")) {
+        setState(() => _connectionStatus = "Connected. Put device in O-mode to transfer data.");
+      }
+
+    } else {
+
+      setState(() => _connectionStatus = "Saved device not found nearby.");
+    }
+  }
+
+
+  Future<void> _connectToDevice(String identifier) async {
+    setState(() {
+      _connectionStatus = 'Connecting to $identifier...';
+      _isMachineReady = false; // Reset machine ready state on new connection attempt
+    });
+    try {
+      final userSettings = {
+        'height': _heightController.text,
+        'gender': _genderController.text,
+        'dateOfBirth': _dobController.text,
+      };
+      final status = await OmronService.connectToDevice(identifier, userSettings: userSettings);
+      if (status.contains("Connected")) {
+        // ✅ Save this device for auto-connect later
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString("paired_device_address", identifier);
+        await prefs.setString("user_height", _heightController.text);
+        await prefs.setString("user_gender", _genderController.text);
+        await prefs.setString("user_dob", _dobController.text);
+      }
+
+      setState(() {
+        _connectionStatus = status;
+        if (status.contains('Connected')) {
+          _isMachineReady = true; // Machine is connected, ready for user to stand on it
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _connectionStatus = 'Connection failed: $e';
+      });
+    }
+  }
+
+  Future<void> _promptStandOnMachine() async {
+    // This is a conceptual step. In a real app, you might show a dialog or change UI state
+    // to instruct the user to stand on the machine. The actual data transfer
+    // would then be triggered by the machine itself or a subsequent user action.
+    // For this demo, we'll just set a flag and enable the transfer button.
+    setState(() {
+      _connectionStatus = 'Please stand on the machine to take a measurement.';
+      // The actual data transfer will be triggered by the user clicking 'Transfer Data'
+      // after standing on the machine.
+    });
+  }
+
+  Future<void> _transferData() async {
+    setState(() {
+      _connectionStatus = 'Transferring data...';
+      _measurementData = null;
+    });
+    try {
+      final data = await OmronService.getData();
+      kDebugPrint("Data: $data");
+      setState(() {
+        _measurementData = data;
+        _connectionStatus = 'Data transfer complete.';
+      });
+    } catch (e) {
+      setState(() {
+        _connectionStatus = 'Data transfer failed: $e';
+      });
+    }
+  }
+
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+  Future<void> _fetchData() async {
+    setState(() => _connectionStatus = "Waiting for O-mode...");
+    try {
+      final data = await OmronService.getData();
+      kDebugPrint("Data: $data");
+      setState(() {
+        _measurementData = data;
+        _connectionStatus = "Data transfer complete!";
+      });
+    } catch (e) {
+      kDebugPrint("Error: $e");
+      setState(() => _connectionStatus = "Data transfer failed: $e");
+    }
+  }
+
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Omron Connect Demo'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Connection Status: $_connectionStatus', style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              TextField(
+                controller: _userHashIdController,
+                decoration: const InputDecoration(labelText: 'User Hash ID'),
+              ),
+              ElevatedButton(
+                onPressed: _setUserHashId,
+                child: const Text('Set User Hash ID'),
+              ),
+              const SizedBox(height: 20),
+              TextField(
+                controller: _heightController,
+                decoration: const InputDecoration(labelText: 'User Height (e.g., 18000 for 180cm)'),
+                keyboardType: TextInputType.number,
+              ),
+              TextField(
+                controller: _genderController,
+                decoration: const InputDecoration(labelText: 'User Gender (Male/Female)'),
+              ),
+              TextField(
+                controller: _dobController,
+                decoration: const InputDecoration(labelText: 'User Date of Birth (YYYYMMDD)'),
+                keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: _isScanning ? null : _startScan,
+                child: Text(_isScanning ? 'Scanning...' : 'Start Scan'),
+              ), ElevatedButton(
+                onPressed: () {
+                  _isScanning ? null : autoConnect();
+                  kDebugPrint("Scanned devices: ${_isScanning} button pressed");
+                } ,
+                child: Text(_isScanning ? 'Auto Scan...' : 'Auto Scan'),
+              ),
+              ElevatedButton(
+                onPressed: _fetchData,
+                child: const Text("Transfer Data (O-mode)"),
+              ),
+              const SizedBox(height: 20),
+              const Text('Discovered Devices:', style: TextStyle(fontWeight: FontWeight.bold)),
+              _devices.isEmpty
+                  ? const Text('No devices found.')
+                  : ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _devices.length,
+                itemBuilder: (context, index) {
+                  final device = _devices[index];
+                  return ListTile(
+                    title: Text(device['name'] ?? 'Unknown Device'),
+                    subtitle: Text(device['identifier'] ?? 'No Identifier'),
+                    trailing: ElevatedButton(
+                      onPressed: () => _connectToDevice(device['identifier']!),
+                      child: const Text('Connect'),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 20),
+              // New button to prompt user to stand on machine
+              ElevatedButton(
+                onPressed: _connectionStatus.contains('Connected') && _isMachineReady
+                    ? _promptStandOnMachine
+                    : null,
+                child: const Text('Stand on Machine'),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: _connectionStatus.contains('Please stand on the machine') ? _transferData : null,
+                child: const Text('Transfer Data'),
+              ),
+              const SizedBox(height: 20),
+              if (_measurementData != null)
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildMeasurementUI(),
+                    // const Text('Measurement Data:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    // Text('Vital Data: ${_measurementData!['vitalData']}'),
+                    // Text('Device Info: ${_measurementData!['deviceInfo']}'),
+                    // Text('Device Settings: ${_measurementData!['deviceSettings']}'),
+
+
+                    _measurementData == null
+                        ? const Text("No measurement data")
+                        : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          "Measurement Data:",
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 10),
+
+                        // Handle vitalData flexibly (could be Map or List)
+                        if (_measurementData!['vitalData'] is List)
+                          ...(_measurementData!['vitalData'] as List).asMap().entries.map((entry) {
+                            final index = entry.key;
+                            final measurement = entry.value;
+                            return Card(
+                              margin: const EdgeInsets.symmetric(vertical: 4),
+                              child: ListTile(
+                                title: Text("Measurement $index"),
+                                subtitle: Text(measurement.toString()),
+                              ),
+                            );
+                          }),
+
+                        if (_measurementData!['vitalData'] is Map)
+                          ...(Map<String, dynamic>.from(_measurementData!['vitalData']))
+                              .entries
+                              .map((e) => Card(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            child: ListTile(
+                              title: Text(e.key.toString()),
+                              subtitle: Text(e.value.toString()),
+                            ),
+                          )),
+
+                        const SizedBox(height: 20),
+                        Text("Device Info: ${_measurementData!['deviceInfo']}"),
+                        Text("Device Settings: ${_measurementData!['deviceSettings']}"),
+                      ],
+                    )
+
+                  ],
+                ),
+
+              if (_connectionStatus.contains('Failed'))
+                ElevatedButton(
+                  onPressed: _startScan,
+                  child: const Text('Retry Scan'),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+  }
+  Widget _buildMeasurementUI() {
+    if (_measurementData == null || _measurementData!['vitalData'] == null) {
+      return const Text("No measurement data yet");
+    }
+
+    final vitalData = Map<String, dynamic>.from(_measurementData!['vitalData']);
+    final weightList = vitalData['OMRONVitalDataWeightKey'];
+
+    if (weightList == null || weightList.isEmpty) {
+      return const Text("No weight records found");
+    }
+
+    // ✅ Get the latest record (last entry)
+    final latest = Map<String, dynamic>.from(weightList.last);
+
+    // ✅ Safely parse values
+    String _format(dynamic value, {bool decimal = false}) {
+      if (value == null) return "--";
+      try {
+        final num parsed = value is num ? value : num.parse(value.toString());
+        return decimal ? parsed.toStringAsFixed(1) : parsed.toString();
+      } catch (_) {
+        return "--";
+      }
+    }
+
+    final weight = _format(latest['OMRONWeightKey'], decimal: true); // weight in kg
+    final bmi = _format(latest['OMRONWeightBMIKey'], decimal: true);
+    final visceralFat = _format(latest['OMRONWeightVisceralFatLevelClassificationKey']);
+    final bodyAge = _format(latest['OMRONWeightBodyAgeKey']);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text("Your Latest Results",
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 20),
+
+        Card(
+          child: ListTile(
+            title: const Text("Weight"),
+            trailing: Text("$weight kg",
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            title: const Text("BMI"),
+            trailing: Text(bmi,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            title: const Text("Visceral Fat Level"),
+            trailing: Text(visceralFat,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            title: const Text("Body Age"),
+            trailing: Text(bodyAge,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+        ),
+      ],
+    );
+  }
+
+
+
+}
+
+
+
+
+
+
+
